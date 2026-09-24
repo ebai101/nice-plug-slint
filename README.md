@@ -42,13 +42,13 @@ fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Edi
         SlintEditor::new(params.editor_state.clone(), || gui::AppWindow::new())
             .with_setup({
                 let params = self.params.clone();
-                move |handler, _window| {
+                move |handler, _window_context| {
                     let component = handler.component();
-                    let context = handler.context().clone();
+                    let setter = handler.context().param_setter();
+                    let params = params.clone();
 
                     // Register UI -> plugin callbacks once when the window opens
                     component.on_gain_changed(move |value| {
-                        let setter = ParamSetter::new(&*context);
                         setter.begin_set_parameter(&params.gain);
                         setter.set_parameter_normalized(&params.gain, value);
                         setter.end_set_parameter(&params.gain);
@@ -57,7 +57,7 @@ fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Edi
             })
             .with_event_loop({
                 let params = self.params.clone();
-                move |handler, _setter, _window| {
+                move |handler, _setter, _window_context| {
                     // Push parameter values to the UI each frame
                     handler.component().set_gain(params.gain.unmodulated_normalized_value());
                 }
@@ -81,7 +81,7 @@ The first argument is the editor state which comes from the params struct. See [
 The second argument is the factory closure which is called each time the window is opened.
 
 - `.with_setup(handler)` - called once when the window opens, before the event loop starts. Use this to register UI → plugin callbacks.
-- `.with_event_loop(handler)` - called every frame. Use this to push parameter values to the UI (plugin → UI).
+- `.with_event_loop(handler)` - called every frame. Use this to push parameter values to the UI (plugin → UI). Both handlers receive a `baseview::WindowContext` alongside the handler.
 
 ### `WindowHandler`
 
@@ -89,17 +89,9 @@ Passed to the event loop handler. Gives you access to:
 
 - `.component()` - the Slint component
 - `.window()` - the Slint window
-- `.context()` - nice-plug's `GuiContext` for parameter operations
-- `.resize(window, width, height)` - resize the window programmatically
-- `.queue_resize(width, height)` - use this from inside Slint callbacks instead of calling `resize` directly, since you won't have the `&mut Window` handy
+- `.context()` - nice-plug's `GuiContext`; call `.param_setter()` on it to change parameters
 
-```rust
-// Resizing from a Slint callback
-let pending = handler.pending_resizes().clone();
-component.on_resize(move || {
-    pending.borrow_mut().push((800, 600));
-});
-```
+Programmatic resizing is not currently supported in this version.
 
 ## Architecture
 

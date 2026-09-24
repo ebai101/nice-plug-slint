@@ -20,7 +20,7 @@ The public-facing struct that implements `Editor`. It holds the state, component
 
 ### `WindowHandler<T>`
 
-Created inside `spawn()` and passed to baseview. This is where the actual work happens - it implements baseview's `WindowHandler` trait and receives `on_frame()` and `on_event()` calls.
+Created inside `spawn()` and passed to baseview. This is where the actual work happens - it implements baseview's `WindowHandler` trait and receives `on_frame()` and `on_event()` calls. It keeps the baseview `WindowContext` so handlers can access the GL context and window geometry.
 
 ### `BaseviewSlintAdapter`
 
@@ -46,28 +46,19 @@ When the window is closed, the `WindowHandler` is dropped. When it's reopened, `
 
 ## GL context and renderer initialization
 
-We can't create the FemtoVG renderer until the GL context is active, but Slint wants to call `renderer()` during component initialization. The fix is:
+We can't create the FemtoVG renderer until the GL context is current, but Slint wants to call `renderer()` during component initialization. The fix is:
 
 1. Make the GL context current before creating the component (done in `spawn()`)
-2. Store the `GlContext`'s proc-address function in the adapter via `set_gl_context()`
-3. The renderer is created lazily in `WindowAdapter::renderer()` using that proc-address function
-
-We also explicitly re-initialize the renderer at the start of the first `on_frame()` call (before calling `component.show()`), so FemtoVG can query `GL_VERSION` with a definitely-current context.
+2. Store the `GlContext` directly in the adapter's `BaseviewOpenGLInterface`, which forwards `ensure_current`, `swap_buffers` and `get_proc_address` to baseview's context
+3. The renderer is created lazily in `WindowAdapter::renderer()` using that interface; every render pass re-ensures the context through the same interface
 
 ## State persistence
 
-`SlintEditorState` is stored in the plugin's params struct under `#[persist]`, which means nice-plug/the host handles serialization. We update the `width` and `height` fields directly through the `Arc` when the window is resized.
+`SlintEditorState` is stored in the plugin's params struct under `#[persist]`, which means nice-plug/the host handles serialization. We update the logical size through the `Arc` when baseview reports a resize.
 
 ## Resize handling
 
-Plugin windows don't get OS-level resize handles - the host controls the window frame. All resizing is programmatic, typically triggered by a drag handle drawn inside the Slint UI itself.
-
-There are two ways to trigger a resize depending on where the call originates:
-
-- **From a Slint callback**: Use `handler.pending_resizes()` to push to a queue, which gets processed in `on_frame()`. You can't call `resize()` directly from a Slint callback because you don't have access to `&mut Window`.
-- **From `on_frame` or `with_event_loop`**: Call `handler.resize(window, width, height)` directly.
-
-`resize()` updates the internal size, notifies Slint, tells the host via `context.request_resize()`, and then actually resizes the baseview window. Baseview may send a `WindowEvent::Resized` back afterwards - `handle_window_info()` handles that to sync the confirmed physical size and scale factor.
+The host controls the plugin window frame. This version does not implement programmatic resizing from inside the UI; size changes arrive only from the host via baseview's `resized()` callback, which syncs the physical size, scale factor and persisted logical size.
 
 ## Keyboard events
 
@@ -88,7 +79,7 @@ fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Edi
     Some(Box::new(
         SlintEditor::new(self.params.editor_state.clone(), || gui::AppWindow::new())
             .with_event_loop({
-                move |handler, _setter, _window| {
+                move |handler, _setter, _window_context| {
                     handler.set_prevent_key_event_propagation(
                         handler.component().get_prevent_key_event_propagation(),
                     );
