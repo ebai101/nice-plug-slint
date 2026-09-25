@@ -44,11 +44,12 @@ fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Edi
                 let params = self.params.clone();
                 move |handler, _window_context| {
                     let component = handler.component();
-                    let setter = handler.context().param_setter();
+                    let context = handler.context().clone();
                     let params = params.clone();
 
                     // Register UI -> plugin callbacks once when the window opens
                     component.on_gain_changed(move |value| {
+                        let setter = context.param_setter();
                         setter.begin_set_parameter(&params.gain);
                         setter.set_parameter_normalized(&params.gain, value);
                         setter.end_set_parameter(&params.gain);
@@ -82,6 +83,7 @@ The second argument is the factory closure which is called each time the window 
 
 - `.with_setup(handler)` - called once when the window opens, before the event loop starts. Use this to register UI → plugin callbacks.
 - `.with_event_loop(handler)` - called every frame. Use this to push parameter values to the UI (plugin → UI). Both handlers receive a `baseview::WindowContext` alongside the handler.
+- `.with_resizable(true)` - opt in to host/user resizing. The default remains fixed-size.
 
 ### `WindowHandler`
 
@@ -90,8 +92,32 @@ Passed to the event loop handler. Gives you access to:
 - `.component()` - the Slint component
 - `.window()` - the Slint window
 - `.context()` - nice-plug's `GuiContext`; call `.param_setter()` on it to change parameters
+- `.request_resize(width, height)` - request a host-negotiated resize in logical pixels
+- `.resize_requester()` - create a cloneable request handle for Slint callbacks
 
-Programmatic resizing is not currently supported in this version.
+Resize requests require `.with_resizable(true)`. A host may decline a request; the
+accepted size reported by baseview is then authoritative and is what Slint and
+`SlintEditorState` receive. Persisted dimensions are logical pixels. The last
+observed scale factor is persisted too, so `Editor::size()` can report native
+pixels on Windows/Linux before the next window is created. A fresh state uses a
+scale factor of `1.0` until baseview observes the actual display scale.
+
+```rust,ignore
+let editor = SlintEditor::new(state, || gui::AppWindow::new())
+    .with_resizable(true)
+    .with_setup(move |handler, _window_context| {
+        let resize = handler.resize_requester();
+        handler.component().on_resize_requested(move |width, height| {
+            if let Err(error) = resize.request_resize(width as u32, height as u32) {
+                eprintln!("Could not resize editor: {error}");
+            }
+        });
+    });
+```
+
+The setup and event-loop callback arguments use `&WindowContext` (baseview
+0.3.x), not `&mut Window`. Parameter setters should be created when handling a
+UI callback from a cloned `GuiContext`, as in the example above.
 
 ## Architecture
 

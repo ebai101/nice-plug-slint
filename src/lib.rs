@@ -9,7 +9,7 @@ use crossbeam::atomic::AtomicCell;
 use nice_plug_core::context::gui::{GuiContext, ParamSetter};
 use nice_plug_core::editor::dpi::NativeSize;
 use nice_plug_core::editor::ParentWindowHandle as NiceParentWindowHandle;
-use nice_plug_core::editor::{Editor, EditorHandle, HostMethods, SpawnedEditor};
+use nice_plug_core::editor::{Editor, EditorHandle, HostMethods, ResizeHint, SpawnedEditor};
 use nice_plug_core::params::persist::PersistentField;
 use once_cell::unsync::OnceCell;
 use slint::platform::femtovg_renderer::FemtoVGRenderer;
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 type EventLoopHandler<T> = dyn Fn(&WindowHandler<T>, ParamSetter, &WindowContext) + Send + Sync;
 type SetupHandler<T> = dyn Fn(&WindowHandler<T>, &WindowContext) + Send + Sync;
 
-/// Window size/state that gets persisted via nice-plug's `#[persist]` mechanism.
+/// Window size and scale state persisted via nice-plug's `#[persist]` mechanism.
 ///
 /// Put this in your params struct so the host can save and restore the window size:
 ///
@@ -45,6 +45,11 @@ type SetupHandler<T> = dyn Fn(&WindowHandler<T>, &WindowContext) + Send + Sync;
 pub struct SlintEditorState {
     #[serde(with = "nice_plug_core::params::persist::serialize_atomic_cell")]
     pub size: AtomicCell<(u32, u32)>,
+    #[serde(
+        default = "default_scale_factor",
+        with = "nice_plug_core::params::persist::serialize_atomic_cell"
+    )]
+    scale_factor: AtomicCell<f64>,
 }
 
 fn default_width() -> u32 {
@@ -54,9 +59,14 @@ fn default_height() -> u32 {
     300
 }
 
+fn default_scale_factor() -> AtomicCell<f64> {
+    AtomicCell::new(1.0)
+}
+
 impl<'a> PersistentField<'a, SlintEditorState> for Arc<SlintEditorState> {
     fn set(&self, new_value: SlintEditorState) {
         self.size.store(new_value.size.load());
+        self.scale_factor.store(new_value.scale_factor.load());
     }
 
     fn map<F, R>(&self, f: F) -> R
@@ -71,6 +81,7 @@ impl Default for SlintEditorState {
     fn default() -> Self {
         Self {
             size: AtomicCell::new((default_width(), default_height())),
+            scale_factor: default_scale_factor(),
         }
     }
 }
@@ -79,12 +90,39 @@ impl SlintEditorState {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             size: AtomicCell::new((width, height)),
+            scale_factor: default_scale_factor(),
         }
     }
 
     /// Returns a `(width, height)` pair for the current size of the GUI in logical pixels.
     pub fn size(&self) -> (u32, u32) {
         self.size.load()
+    }
+
+    /// Returns the last observed window scale factor, or `1.0` before one is observed.
+    pub fn scale_factor(&self) -> f64 {
+        let scale_factor = self.scale_factor.load();
+        if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        }
+    }
+}
+
+fn native_size(state: &SlintEditorState) -> NativeSize<u32> {
+    let (width, height) = state.size();
+    NativeSize::from_size(
+        Size::Logical(BaseviewLogicalSize::new(width as f64, height as f64)),
+        state.scale_factor(),
+    )
+}
+
+fn resize_hint(resizable: bool) -> ResizeHint {
+    if resizable {
+        ResizeHint::RESIZABLE
+    } else {
+        ResizeHint::NON_RESIZABLE
     }
 }
 
@@ -93,7 +131,8 @@ impl SlintEditorState {
 /// Build one with [`SlintEditor::new`], optionally chaining
 /// [`with_setup`][Self::with_setup] and
 /// [`with_event_loop`][Self::with_event_loop] to register callbacks and sync
-/// parameters each frame.
+/// parameters each frame. Editors are fixed-size unless
+/// [`with_resizable`][Self::with_resizable] is enabled.
 ///
 /// ```rust,ignore
 /// fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
@@ -103,9 +142,10 @@ impl SlintEditorState {
 ///                 let params = self.params.clone();
 ///                 move |handler, _window_context| {
 ///                     let component = handler.component();
-///                     let setter = handler.context().param_setter();
+///                     let context = handler.context().clone();
 ///                     let params = params.clone();
 ///                     component.on_gain_changed(move |value| {
+///                         let setter = context.param_setter();
 ///                         setter.begin_set_parameter(&params.gain);
 ///                         setter.set_parameter_normalized(&params.gain, value);
 ///                         setter.end_set_parameter(&params.gain);
@@ -126,6 +166,7 @@ pub struct SlintEditor<T: slint::ComponentHandle> {
     state: Arc<SlintEditorState>,
     event_loop_handler: Arc<EventLoopHandler<T>>,
     setup_handler: Arc<SetupHandler<T>>,
+    resizable: bool,
 }
 
 impl<T: slint::ComponentHandle + 'static> SlintEditor<T> {
@@ -139,6 +180,7 @@ impl<T: slint::ComponentHandle + 'static> SlintEditor<T> {
             state,
             event_loop_handler: Arc::new(|_, _, _| {}),
             setup_handler: Arc::new(|_, _| {}),
+            resizable: false,
         }
     }
 
@@ -159,6 +201,15 @@ impl<T: slint::ComponentHandle + 'static> SlintEditor<T> {
         F: Fn(&WindowHandler<T>, ParamSetter, &WindowContext) + 'static + Send + Sync,
     {
         self.event_loop_handler = Arc::new(handler);
+        self
+    }
+
+    /// Allow the host or user to resize this editor. Editors are fixed-size by default.
+    ///
+    /// When enabled, hosts can resize the window and [`WindowHandler::request_resize`]
+    /// can request a negotiated size change from the GUI thread.
+    pub fn with_resizable(mut self, resizable: bool) -> Self {
+        self.resizable = resizable;
         self
     }
 }
@@ -296,6 +347,7 @@ pub struct WindowHandler<T: slint::ComponentHandle> {
     adapter: Rc<BaseviewSlintAdapter>,
     window_context: WindowContext,
     prevent_key_event_propagation: RefCell<bool>,
+    resizable: bool,
 }
 
 impl<T: slint::ComponentHandle> WindowHandler<T> {
@@ -304,6 +356,7 @@ impl<T: slint::ComponentHandle> WindowHandler<T> {
         let scale = size.scale_factor as f32;
 
         *self.scale_factor.borrow_mut() = scale;
+        self.state.scale_factor.store(size.scale_factor);
 
         // Update adapter with physical size
         self.adapter
@@ -375,6 +428,60 @@ impl<T: slint::ComponentHandle> WindowHandler<T> {
 
     pub fn set_prevent_key_event_propagation(&self, is_enabled: bool) {
         *self.prevent_key_event_propagation.borrow_mut() = is_enabled;
+    }
+
+    /// Request a logical window size. The host may deny the resize; in that case
+    /// baseview reports the reverted size through `resized()`.
+    pub fn request_resize(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.resize_requester().request_resize(width, height)
+    }
+
+    /// Returns a cloneable resize requester for use in Slint callbacks.
+    pub fn resize_requester(&self) -> ResizeRequester {
+        ResizeRequester {
+            window_context: self.window_context.clone(),
+            resizable: self.resizable,
+        }
+    }
+}
+
+/// A cloneable GUI-thread handle for requesting a host-negotiated resize.
+#[derive(Clone)]
+pub struct ResizeRequester {
+    window_context: WindowContext,
+    resizable: bool,
+}
+
+impl ResizeRequester {
+    /// Request a logical window size. The host may deny the resize; in that case
+    /// baseview reports the reverted size through `resized()`.
+    pub fn request_resize(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if width == 0 || height == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "resize dimensions must be nonzero",
+            )
+            .into());
+        }
+        if !self.resizable {
+            return Err(
+                std::io::Error::other("programmatic resizing is disabled for this editor").into(),
+            );
+        }
+        self.window_context
+            .resize(Size::Logical(BaseviewLogicalSize::new(
+                width as f64,
+                height as f64,
+            )))
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
     }
 }
 
@@ -562,7 +669,9 @@ impl<T: slint::ComponentHandle + 'static> BaseviewWindowHandler for WindowHandle
 
 /// The handle returned by [`SlintEditor::spawn`]. The wrapper uses it to
 /// control the baseview window opened for the editor.
-pub struct SlintEditorHandle;
+pub struct SlintEditorHandle {
+    resizable: bool,
+}
 
 impl EditorHandle for SlintEditorHandle {
     type Window = Window;
@@ -594,6 +703,24 @@ impl EditorHandle for SlintEditorHandle {
         window: &Self::Window,
     ) -> Result<(), Self::Error> {
         window.resize(new_size)
+    }
+
+    fn adjust_size(
+        &self,
+        new_size: NativeSize<u32>,
+        _window: &Self::Window,
+    ) -> Option<NativeSize<u32>> {
+        self.resizable.then_some(new_size)
+    }
+
+    fn set_fallback_scale_factor(
+        &self,
+        scale_factor: f64,
+        window: &Self::Window,
+    ) -> Result<(), Self::Error> {
+        // Persist the resulting scale only when baseview reports the actual
+        // size/scale through `resized()`.
+        window.suggest_fallback_scale_factor(scale_factor)
     }
 
     fn host_main_thread_callback(&self, window: &Self::Window) {
@@ -651,8 +778,8 @@ impl<T: slint::ComponentHandle + 'static> Editor for SlintEditor<T> {
             .with_size(BaseviewLogicalSize::new(width as f64, height as f64))
             .with_parent(parent.as_ref())
             .with_wait_for_parent(wait_for_parent)
-            .with_fallback_scale_factor(fallback_scale_factor)
-            .with_resizable(false)
+            .with_fallback_scale_factor(fallback_scale_factor.or(Some(self.state.scale_factor())))
+            .with_resizable(self.resizable)
             // Request OpenGL context for FemtoVG rendering
             .with_gl_config(Some(GlConfig {
                 version: (3, 2),
@@ -670,6 +797,7 @@ impl<T: slint::ComponentHandle + 'static> Editor for SlintEditor<T> {
         });
 
         let state = self.state.clone();
+        let resizable = self.resizable;
         let event_loop_handler = self.event_loop_handler.clone();
         let setup_handler = self.setup_handler.clone();
         let component_factory = self.component_factory.clone();
@@ -689,6 +817,7 @@ impl<T: slint::ComponentHandle + 'static> Editor for SlintEditor<T> {
                 // Create the Slint window adapter with the current physical size.
                 let size = window_context.size();
                 let scale = size.scale_factor as f32;
+                state.scale_factor.store(size.scale_factor);
                 let adapter = BaseviewSlintAdapter::new(
                     size.physical.width,
                     size.physical.height,
@@ -725,24 +854,78 @@ impl<T: slint::ComponentHandle + 'static> Editor for SlintEditor<T> {
                     adapter,
                     window_context,
                     prevent_key_event_propagation: RefCell::new(false),
+                    resizable,
                 })
             },
             host,
         )?;
 
         Ok(SpawnedEditor {
-            handle: SlintEditorHandle,
+            handle: SlintEditorHandle {
+                resizable: self.resizable,
+            },
             window,
         })
     }
 
     fn size(&self) -> NativeSize<u32> {
-        let (width, height) = self.state.size();
-        // The persisted size is logical; `from_size` converts it to the
-        // platform's native units.
-        NativeSize::from_size(
-            Size::Logical(BaseviewLogicalSize::new(width as f64, height as f64)),
-            1.0,
-        )
+        native_size(&self.state)
+    }
+
+    fn resize_hint(&self) -> ResizeHint {
+        resize_hint(self.resizable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_persisted_state_defaults_scale_factor_to_one() {
+        let state: SlintEditorState = serde_json::from_str(r#"{"size":[320, 200]}"#).unwrap();
+
+        assert_eq!(state.size(), (320, 200));
+        assert_eq!(state.scale_factor(), 1.0);
+    }
+
+    #[test]
+    fn observed_scale_factor_survives_persistence_round_trip() {
+        let state = SlintEditorState::new(320, 200);
+        state.scale_factor.store(1.75);
+
+        let serialized = serde_json::to_string(&state).unwrap();
+        let restored: SlintEditorState = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(restored.size(), (320, 200));
+        assert_eq!(restored.scale_factor(), 1.75);
+    }
+
+    #[test]
+    fn persisted_scale_factor_converts_logical_size_to_native_size() {
+        let state = SlintEditorState::new(320, 200);
+        state.scale_factor.store(2.0);
+
+        let size = native_size(&state);
+        #[cfg(target_os = "macos")]
+        assert_eq!((size.width, size.height), (320, 200));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!((size.width, size.height), (640, 400));
+    }
+
+    #[test]
+    fn invalid_persisted_scale_factor_falls_back_to_one() {
+        let state = SlintEditorState::new(320, 200);
+        state.scale_factor.store(f64::NAN);
+
+        assert_eq!(state.scale_factor(), 1.0);
+        let size = native_size(&state);
+        assert_eq!((size.width, size.height), (320, 200));
+    }
+
+    #[test]
+    fn resize_hint_is_opt_in() {
+        assert_eq!(resize_hint(false), ResizeHint::NON_RESIZABLE);
+        assert_eq!(resize_hint(true), ResizeHint::RESIZABLE);
     }
 }

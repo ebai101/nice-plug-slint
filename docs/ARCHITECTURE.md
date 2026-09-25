@@ -54,11 +54,17 @@ We can't create the FemtoVG renderer until the GL context is current, but Slint 
 
 ## State persistence
 
-`SlintEditorState` is stored in the plugin's params struct under `#[persist]`, which means nice-plug/the host handles serialization. We update the logical size through the `Arc` when baseview reports a resize.
+`SlintEditorState` is stored in the plugin's params struct under `#[persist]`, which means nice-plug/the host handles serialization. It stores logical dimensions and the last observed scale factor. Older serialized states without a scale factor default to `1.0`.
 
 ## Resize handling
 
-The host controls the plugin window frame. This version does not implement programmatic resizing from inside the UI; size changes arrive only from the host via baseview's `resized()` callback, which syncs the physical size, scale factor and persisted logical size.
+Editors are fixed-size by default. `SlintEditor::with_resizable(true)` opts in to host/user resizing and enables the matching nice-plug `ResizeHint`. UI code can use `WindowHandler::request_resize()` or clone a `ResizeRequester` into a Slint callback. Requests flow through baseview's `WindowContext::resize()`, which negotiates with the host where required.
+
+The `resized()` callback is authoritative: it updates the physical framebuffer size, scale factor, persisted logical dimensions, and Slint's logical size/scale events. If a host rejects a resize request, baseview reverts the native window and sends the reverted size through the same callback. Host-originated changes and scale changes use that path as well.
+
+`Editor::size()` converts persisted logical dimensions using the last observed scale. On macOS nice-plug represents native editor size in logical points; on Windows/Linux it reports physical pixels. Before a window has been created, a fresh state uses scale `1.0`; subsequent opens use the last observed value as baseview's fallback scale. A host-provided fallback scale takes precedence.
+
+The adapter's conversions have unit tests and compile on the supported targets. Real host behavior still needs smoke testing on macOS, Linux/X11, and Windows because resize denial, DPI changes, and host callback timing are platform/host dependent.
 
 ## Keyboard events
 
