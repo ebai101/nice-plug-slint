@@ -32,7 +32,7 @@ Implements `slint::platform::Platform`. Slint calls `create_window_adapter()` on
 
 ### `BaseviewOpenGLInterface`
 
-Implements `slint::platform::femtovg_renderer::OpenGLInterface`. Mostly no-ops since baseview handles context management - the only real implementation is `get_proc_address`, which delegates to `baseview::gl::GlContext::get_proc_address`.
+Implements `slint::platform::femtovg_renderer::OpenGLInterface`. It forwards `ensure_current` and `swap_buffers` to baseview's `GlContext`, and `get_proc_address` delegates to `baseview::gl::GlContext::get_proc_address`.
 
 ## How window open/close/reopen works
 

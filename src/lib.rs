@@ -1,12 +1,13 @@
-use baseview::dpi::{LogicalSize as BaseviewLogicalSize, Size};
-use baseview::gl::GlConfig;
-use baseview::host::{Host, HostCallbacks, HostMainThreadCaller};
 use baseview::{
+    dpi::{LogicalSize as BaseviewLogicalSize, Size},
+    gl::GlConfig,
+    host::{Host, HostCallbacks, HostMainThreadCaller},
     Error as BaseviewError, Event, HandlerError, Window, WindowContext,
     WindowHandler as BaseviewWindowHandler, WindowSettings, WindowSize,
 };
 use crossbeam::atomic::AtomicCell;
-use nice_plug_core::context::gui::{GuiContext, ParamSetter};
+use nice_plug_core::context::gui::GuiContext;
+use nice_plug_core::context::gui::ParamSetter;
 use nice_plug_core::editor::dpi::NativeSize;
 use nice_plug_core::editor::ParentWindowHandle as NiceParentWindowHandle;
 use nice_plug_core::editor::{Editor, EditorHandle, HostMethods, ResizeHint, SpawnedEditor};
@@ -16,9 +17,7 @@ use slint::platform::femtovg_renderer::FemtoVGRenderer;
 use slint::platform::WindowAdapter;
 use slint::platform::WindowEvent;
 use slint::{LogicalPosition, PhysicalSize, SharedString};
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 pub use baseview::{DropData, DropEffect, EventStatus, MouseEvent};
 
@@ -245,7 +244,7 @@ unsafe impl slint::platform::femtovg_renderer::OpenGLInterface for BaseviewOpenG
         _width: core::num::NonZeroU32,
         _height: core::num::NonZeroU32,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // The GL framebuffer follows the window size; nothing to do here.
+        // Resize is handled via WindowAdapter::size()
         Ok(())
     }
 
@@ -284,6 +283,7 @@ struct BaseviewSlintAdapter {
     physical_size: RefCell<PhysicalSize>,
     /// Scale factor (e.g., 2.0 on Retina displays)
     scale_factor: RefCell<f32>,
+    /// GL context interface used to create and drive the FemtoVG renderer
     gl_interface: BaseviewOpenGLInterface,
 }
 
@@ -450,6 +450,9 @@ impl<T: slint::ComponentHandle> WindowHandler<T> {
 }
 
 /// A cloneable GUI-thread handle for requesting a host-negotiated resize.
+///
+/// Clone this into Slint callbacks, which can't borrow the window handler, to
+/// request a resize without holding the handler or the baseview window.
 #[derive(Clone)]
 pub struct ResizeRequester {
     window_context: WindowContext,
@@ -573,12 +576,11 @@ impl<T: slint::ComponentHandle + 'static> BaseviewWindowHandler for WindowHandle
                             baseview::ScrollDelta::Pixels { x, y } => (x, y),
                         };
                         WindowEvent::PointerScrolled {
-                            position: *self.last_cursor_pos.borrow(),
+                            position: LogicalPosition::new(0.0, 0.0),
                             delta_x,
                             delta_y,
                         }
                     }
-                    baseview::MouseEvent::CursorLeft => WindowEvent::PointerExited,
                     _ => return EventStatus::Ignored,
                 };
                 self.adapter.window.dispatch_event(slint_event);
@@ -641,27 +643,7 @@ impl<T: slint::ComponentHandle + 'static> BaseviewWindowHandler for WindowHandle
                     EventStatus::Ignored
                 }
             }
-            Event::Window(window_event) => {
-                match window_event {
-                    baseview::WindowEvent::Focused => {
-                        self.adapter
-                            .window
-                            .dispatch_event(WindowEvent::WindowActiveChanged(true));
-                    }
-                    baseview::WindowEvent::Unfocused => {
-                        self.adapter
-                            .window
-                            .dispatch_event(WindowEvent::WindowActiveChanged(false));
-                    }
-                    baseview::WindowEvent::WillClose => {
-                        self.adapter
-                            .window
-                            .dispatch_event(WindowEvent::CloseRequested);
-                    }
-                    _ => {}
-                }
-                EventStatus::Ignored
-            }
+            Event::Window(_) => EventStatus::Ignored,
             _ => EventStatus::Ignored,
         }
     }

@@ -71,7 +71,7 @@ fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Edi
 
 ### `SlintEditorState`
 
-Holds the window size. Construct with `Arc::new(SlintEditorState::new(w, h))`. It should be stored on your params struct with the `#[persist]` attribute to persist the state across sessions.
+Holds the window size and the last observed scale factor. Construct with `Arc::new(SlintEditorState::new(w, h))`. It should be stored on your params struct with the `#[persist]` attribute to persist the state across sessions.
 
 ### `SlintEditor`
 
