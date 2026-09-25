@@ -1,10 +1,12 @@
 # nice-plug-slint Architecture
 
-This document explains how the Slint/baseview bridge works. Most users won't need to read this, but it's useful if you're debugging something weird or want to contribute.
+This document explains how the Slint/baseview bridge works.
+Most users won't need to read this, but it's useful if you're debugging something weird or want to contribute.
 
 ## Overview
 
-nice-plug's `Editor` trait requires implementing `spawn()`, which is called by the host to open the plugin window. We use baseview for the actual OS window, and Slint's FemtoVG renderer (OpenGL) for drawing the UI.
+nice-plug's `Editor` trait requires implementing `spawn()`, which is called by the host to open the plugin window.
+We use baseview for the actual OS window, and Slint's FemtoVG renderer (OpenGL) for drawing the UI.
 
 The tricky parts are:
 
@@ -16,23 +18,32 @@ The tricky parts are:
 
 ### `SlintEditor<T>`
 
-The public-facing struct that implements `Editor`. It holds the state, component factory and the event loop handler. Nothing interesting happens here until `spawn()` is called.
+The public-facing struct that implements `Editor`.
+It holds the state, component factory and the event loop handler.
+Nothing interesting happens here until `spawn()` is called.
 
 ### `WindowHandler<T>`
 
-Created inside `spawn()` and passed to baseview. This is where the actual work happens - it implements baseview's `WindowHandler` trait and receives `on_frame()` and `on_event()` calls. It keeps the baseview `WindowContext` so handlers can access the GL context and window geometry.
+Created inside `spawn()` and passed to baseview.
+This is where the actual work happens - it implements baseview's `WindowHandler` trait and receives `on_frame()` and `on_event()` calls.
+It keeps the baseview `WindowContext` so handlers can access the GL context and window geometry.
 
 ### `BaseviewSlintAdapter`
 
-Implements `slint::platform::WindowAdapter`. Slint calls this to get the window size and renderer. The renderer is lazily initialized (stored in a `OnceCell`) because it can only be created once the GL context is current.
+Implements `slint::platform::WindowAdapter`.
+Slint calls this to get the window size and renderer.
+The renderer is lazily initialized (stored in a `OnceCell`) because it can only be created once the GL context is current.
 
 ### `BaseviewSlintPlatform`
 
-Implements `slint::platform::Platform`. Slint calls `create_window_adapter()` on this when a new component is created. We set this once globally and use a thread-local (`CURRENT_ADAPTER`) to return the right adapter for the current window.
+Implements `slint::platform::Platform`.
+Slint calls `create_window_adapter()` on this when a new component is created.
+We set this once globally and use a thread-local (`CURRENT_ADAPTER`) to return the right adapter for the current window.
 
 ### `BaseviewOpenGLInterface`
 
-Implements `slint::platform::femtovg_renderer::OpenGLInterface`. It forwards `ensure_current` and `swap_buffers` to baseview's `GlContext`, and `get_proc_address` delegates to `baseview::gl::GlContext::get_proc_address`.
+Implements `slint::platform::femtovg_renderer::OpenGLInterface`.
+It forwards `ensure_current` and `swap_buffers` to baseview's `GlContext`, and `get_proc_address` delegates to `baseview::gl::GlContext::get_proc_address`.
 
 ## How window open/close/reopen works
 
@@ -42,11 +53,14 @@ When `spawn()` is called:
 2. We call `slint::platform::set_platform()` - this only takes effect the first time; subsequent calls are silently ignored by Slint
 3. When Slint creates the component and calls `create_window_adapter()`, it gets the adapter we just stored
 
-When the window is closed, the `WindowHandler` is dropped. When it's reopened, `spawn()` is called again and we store a new adapter in `CURRENT_ADAPTER`. Since the platform is already set, `create_window_adapter()` just picks up the new adapter from thread-local storage.
+When the window is closed, the `WindowHandler` is dropped.
+When it's reopened, `spawn()` is called again and we store a new adapter in `CURRENT_ADAPTER`.
+Since the platform is already set, `create_window_adapter()` just picks up the new adapter from thread-local storage.
 
 ## GL context and renderer initialization
 
-We can't create the FemtoVG renderer until the GL context is current, but Slint wants to call `renderer()` during component initialization. The fix is:
+We can't create the FemtoVG renderer until the GL context is current, but Slint wants to call `renderer()` during component initialization.
+The fix is:
 
 1. Make the GL context current before creating the component (done in `spawn()`)
 2. Store the `GlContext` directly in the adapter's `BaseviewOpenGLInterface`, which forwards `ensure_current`, `swap_buffers` and `get_proc_address` to baseview's context
@@ -54,21 +68,33 @@ We can't create the FemtoVG renderer until the GL context is current, but Slint 
 
 ## State persistence
 
-`SlintEditorState` is stored in the plugin's params struct under `#[persist]`, which means nice-plug/the host handles serialization. It stores logical dimensions and the last observed scale factor. Older serialized states without a scale factor default to `1.0`.
+`SlintEditorState` is stored in the plugin's params struct under `#[persist]`, which means nice-plug/the host handles serialization.
+It stores logical dimensions and the last observed scale factor.
+Older serialized states without a scale factor default to `1.0`.
 
 ## Resize handling
 
-Editors are fixed-size by default. `SlintEditor::with_resizable(true)` opts in to host/user resizing and enables the matching nice-plug `ResizeHint`. UI code can use `WindowHandler::request_resize()` or clone a `ResizeRequester` into a Slint callback. Requests flow through baseview's `WindowContext::resize()`, which negotiates with the host where required.
+Editors are fixed-size by default.
+`SlintEditor::with_resizable(true)` opts in to host/user resizing and enables the matching nice-plug `ResizeHint`.
+UI code can use `WindowHandler::request_resize()` or clone a `ResizeRequester` into a Slint callback.
+Requests flow through baseview's `WindowContext::resize()`, which negotiates with the host where required.
 
-The `resized()` callback is authoritative: it updates the physical framebuffer size, scale factor, persisted logical dimensions, and Slint's logical size/scale events. If a host rejects a resize request, baseview reverts the native window and sends the reverted size through the same callback. Host-originated changes and scale changes use that path as well.
+The `resized()` callback is authoritative: it updates the physical framebuffer size, scale factor, persisted logical dimensions, and Slint's logical size/scale events.
+If a host rejects a resize request, baseview reverts the native window and sends the reverted size through the same callback.
+Host-originated changes and scale changes use that path as well.
 
-`Editor::size()` converts persisted logical dimensions using the last observed scale. On macOS nice-plug represents native editor size in logical points; on Windows/Linux it reports physical pixels. Before a window has been created, a fresh state uses scale `1.0`; subsequent opens use the last observed value as baseview's fallback scale. A host-provided fallback scale takes precedence.
+`Editor::size()` converts persisted logical dimensions using the last observed scale.
+On macOS nice-plug represents native editor size in logical points; on Windows/Linux it reports physical pixels.
+Before a window has been created, a fresh state uses scale `1.0`; subsequent opens use the last observed value as baseview's fallback scale.
+A host-provided fallback scale takes precedence.
 
-The adapter's conversions have unit tests and compile on the supported targets. Real host behavior still needs smoke testing on macOS, Linux/X11, and Windows because resize denial, DPI changes, and host callback timing are platform/host dependent.
+The adapter's conversions have unit tests and compile on the supported targets.
+Real host behavior still needs smoke testing on macOS, Linux/X11, and Windows because resize denial, DPI changes, and host callback timing are platform/host dependent.
 
 ## Keyboard events
 
-All keyboard events are dispatched to the Slint application and passed to the plugin host by default. You can block propagation to the host when needed - for example, text input components need to capture key events so the host's keyboard shortcuts don't fire while the user is typing.
+All keyboard events are dispatched to the Slint application and passed to the plugin host by default.
+You can block propagation to the host when needed - for example, text input components need to capture key events so the host's keyboard shortcuts don't fire while the user is typing.
 
 To control propagation, add a property to your Slint component and toggle it when you need exclusive key input:
 
@@ -78,7 +104,8 @@ export component AppWindow inherits Window {
 }
 ```
 
-In the `.with_event_loop` handler, sync this property to `set_prevent_key_event_propagation` on the handler. When `true`, key events are returned as `Captured` (host doesn't see them); when `false`, they're returned as `Ignored` (host sees them too).
+In the `.with_event_loop` handler, sync this property to `set_prevent_key_event_propagation` on the handler.
+When `true`, key events are returned as `Captured` (host doesn't see them); when `false`, they're returned as `Ignored` (host sees them too).
 
 ```rust
 fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
@@ -101,4 +128,7 @@ Set `prevent_key_event_propagation` back to false once the component no longer n
 
 **Plugin → UI:** Read parameter values in the `with_event_loop` handler and push them to Slint component properties each frame.
 
-**UI → Plugin:** Register Slint callbacks (e.g. `component.on_gain_changed(...)`) using `with_setup`. This runs once when the window first opens, before the event loop starts. Prefer this over registering callbacks in `with_event_loop`, since re-registering every frame is wasteful even if harmless.
+**UI → Plugin:** Register Slint callbacks (e.g.
+`component.on_gain_changed(...)`) using `with_setup`.
+This runs once when the window first opens, before the event loop starts.
+Prefer this over registering callbacks in `with_event_loop`, since re-registering every frame is wasteful even if harmless.

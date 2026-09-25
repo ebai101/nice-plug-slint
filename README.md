@@ -1,6 +1,7 @@
 # nice-plug-slint
 
-An adapter for using [Slint](https://slint.dev/) GUIs with [nice-plug](https://codeberg.org/RustAudio/nice-plug) audio plugins. It uses baseview for windowing and FemtoVG (OpenGL) for rendering.
+An adapter for using [Slint](https://slint.dev/) GUIs with [nice-plug](https://codeberg.org/RustAudio/nice-plug) audio plugins.
+It uses baseview for windowing and FemtoVG (OpenGL) for rendering.
 
 ## Example
 
@@ -71,23 +72,31 @@ fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Edi
 
 ### `SlintEditorState`
 
-Holds the window size and the last observed scale factor. Construct with `Arc::new(SlintEditorState::new(w, h))`. It should be stored on your params struct with the `#[persist]` attribute to persist the state across sessions.
+Holds the window size and the last observed scale factor.
+Construct with `Arc::new(SlintEditorState::new(w, h))`.
+It should be stored on your params struct with the `#[persist]` attribute to persist the state across sessions.
 
 ### `SlintEditor`
 
 Created with `SlintEditor::new(state, factory)`.
 
-The first argument is the editor state which comes from the params struct. See [SlintEditorState](#slinteditorstate).
+The first argument is the editor state which comes from the params struct.
+See [SlintEditorState](#slinteditorstate).
 
 The second argument is the factory closure which is called each time the window is opened.
 
-- `.with_setup(handler)` - called once when the window opens, before the event loop starts. Use this to register UI → plugin callbacks.
-- `.with_event_loop(handler)` - called every frame. Use this to push parameter values to the UI (plugin → UI). Both handlers receive a `baseview::WindowContext` alongside the handler.
-- `.with_resizable(true)` - opt in to host/user resizing. The default remains fixed-size.
+- `.with_setup(handler)` - called once when the window opens, before the event loop starts.
+  Use this to register UI → plugin callbacks.
+- `.with_event_loop(handler)` - called every frame.
+  Use this to push parameter values to the UI (plugin → UI).
+  Both handlers receive a `baseview::WindowContext` alongside the handler.
+- `.with_resizable(true)` - opt in to host/user resizing.
+  The default remains fixed-size.
 
 ### `WindowHandler`
 
-Passed to the event loop handler. Gives you access to:
+Passed to the event loop handler.
+Gives you access to:
 
 - `.component()` - the Slint component
 - `.window()` - the Slint window
@@ -95,12 +104,11 @@ Passed to the event loop handler. Gives you access to:
 - `.request_resize(width, height)` - request a host-negotiated resize in logical pixels
 - `.resize_requester()` - create a cloneable request handle for Slint callbacks
 
-Resize requests require `.with_resizable(true)`. A host may decline a request; the
-accepted size reported by baseview is then authoritative and is what Slint and
-`SlintEditorState` receive. Persisted dimensions are logical pixels. The last
-observed scale factor is persisted too, so `Editor::size()` can report native
-pixels on Windows/Linux before the next window is created. A fresh state uses a
-scale factor of `1.0` until baseview observes the actual display scale.
+Resize requests require `.with_resizable(true)`.
+A host may decline a request; the accepted size reported by baseview is then authoritative and is what Slint and `SlintEditorState` receive.
+Persisted dimensions are logical pixels.
+The last observed scale factor is persisted too, so `Editor::size()` can report native pixels on Windows/Linux before the next window is created.
+A fresh state uses a scale factor of `1.0` until baseview observes the actual display scale.
 
 ```rust,ignore
 let editor = SlintEditor::new(state, || gui::AppWindow::new())
@@ -115,9 +123,8 @@ let editor = SlintEditor::new(state, || gui::AppWindow::new())
     });
 ```
 
-The setup and event-loop callback arguments use `&WindowContext` (baseview
-0.3.x), not `&mut Window`. Parameter setters should be created when handling a
-UI callback from a cloned `GuiContext`, as in the example above.
+The setup and event-loop callback arguments use `&WindowContext` (baseview 0.3.x), not `&mut Window`.
+Parameter setters should be created when handling a UI callback from a cloned `GuiContext`, as in the example above.
 
 ## Architecture
 
