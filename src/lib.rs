@@ -117,6 +117,19 @@ fn native_size(state: &SlintEditorState) -> NativeSize<u32> {
     )
 }
 
+fn window_size_events(size: WindowSize) -> impl Iterator<Item = WindowEvent> {
+    [
+        Some(WindowEvent::ScaleFactorChanged {
+            scale_factor: size.scale_factor as f32,
+        }),
+        (size.logical.width > 0.0 && size.logical.height > 0.0).then_some(WindowEvent::Resized {
+            size: slint::LogicalSize::new(size.logical.width as f32, size.logical.height as f32),
+        }),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 fn resize_hint(resizable: bool) -> ResizeHint {
     if resizable {
         ResizeHint::RESIZABLE
@@ -367,24 +380,9 @@ impl<T: slint::ComponentHandle> WindowHandler<T> {
             .size
             .store((size.logical.width as u32, size.logical.height as u32));
 
-        // Notify Slint of the new size (logical)
-        if size.logical.width > 0.0 && size.logical.height > 0.0 {
-            self.adapter
-                .window
-                .dispatch_event(slint::platform::WindowEvent::Resized {
-                    size: slint::LogicalSize::new(
-                        size.logical.width as f32,
-                        size.logical.height as f32,
-                    ),
-                });
+        for event in window_size_events(size) {
+            self.adapter.window.dispatch_event(event);
         }
-
-        // Also set the scale factor on the Slint window
-        self.adapter
-            .window
-            .dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
-                scale_factor: scale,
-            });
     }
 
     /// Convert a physical baseview position to a logical Slint position.
@@ -799,7 +797,6 @@ impl<T: slint::ComponentHandle + 'static> Editor for SlintEditor<T> {
                 // Create the Slint window adapter with the current physical size.
                 let size = window_context.size();
                 let scale = size.scale_factor as f32;
-                state.scale_factor.store(size.scale_factor);
                 let adapter = BaseviewSlintAdapter::new(
                     size.physical.width,
                     size.physical.height,
@@ -824,7 +821,7 @@ impl<T: slint::ComponentHandle + 'static> Editor for SlintEditor<T> {
                 // Defer show() until on_frame so the GL context is current when
                 // FemtoVG first renders.
 
-                Ok(WindowHandler {
+                let handler = WindowHandler {
                     context: gui_context,
                     event_loop_handler,
                     setup_handler,
@@ -837,7 +834,11 @@ impl<T: slint::ComponentHandle + 'static> Editor for SlintEditor<T> {
                     window_context,
                     prevent_key_event_propagation: RefCell::new(false),
                     resizable,
-                })
+                };
+
+                handler.handle_window_size(size);
+
+                Ok(handler)
             },
             host,
         )?;
@@ -903,6 +904,23 @@ mod tests {
         assert_eq!(state.scale_factor(), 1.0);
         let size = native_size(&state);
         assert_eq!((size.width, size.height), (320, 200));
+    }
+
+    #[test]
+    fn window_size_events_set_scale_before_resizing() {
+        let events: Vec<_> = window_size_events(WindowSize::from_logical(
+            BaseviewLogicalSize::new(320.0, 200.0),
+            2.0,
+        ))
+        .collect();
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                WindowEvent::ScaleFactorChanged { scale_factor: 2.0 },
+                WindowEvent::Resized { size }
+            ] if size.width == 320.0 && size.height == 200.0
+        ));
     }
 
     #[test]
