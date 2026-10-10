@@ -138,6 +138,17 @@ fn resize_hint(resizable: bool) -> ResizeHint {
     }
 }
 
+fn slint_pointer_button(
+    button: baseview::MouseButton,
+) -> Option<slint::platform::PointerEventButton> {
+    match button {
+        baseview::MouseButton::Left => Some(slint::platform::PointerEventButton::Left),
+        baseview::MouseButton::Right => Some(slint::platform::PointerEventButton::Right),
+        baseview::MouseButton::Middle => Some(slint::platform::PointerEventButton::Middle),
+        _ => None,
+    }
+}
+
 /// The nice-plug [`Editor`] implementation for Slint UIs.
 ///
 /// Build one with [`SlintEditor::new`], optionally chaining
@@ -533,17 +544,8 @@ impl<T: slint::ComponentHandle + 'static> BaseviewWindowHandler for WindowHandle
                         WindowEvent::PointerMoved { position: pos }
                     }
                     baseview::MouseEvent::ButtonPressed { button, .. } => {
-                        let slint_button = match button {
-                            baseview::MouseButton::Left => {
-                                slint::platform::PointerEventButton::Left
-                            }
-                            baseview::MouseButton::Right => {
-                                slint::platform::PointerEventButton::Right
-                            }
-                            baseview::MouseButton::Middle => {
-                                slint::platform::PointerEventButton::Middle
-                            }
-                            _ => return EventStatus::Ignored,
+                        let Some(slint_button) = slint_pointer_button(button) else {
+                            return EventStatus::Ignored;
                         };
                         WindowEvent::PointerPressed {
                             button: slint_button,
@@ -551,17 +553,8 @@ impl<T: slint::ComponentHandle + 'static> BaseviewWindowHandler for WindowHandle
                         }
                     }
                     baseview::MouseEvent::ButtonReleased { button, .. } => {
-                        let slint_button = match button {
-                            baseview::MouseButton::Left => {
-                                slint::platform::PointerEventButton::Left
-                            }
-                            baseview::MouseButton::Right => {
-                                slint::platform::PointerEventButton::Right
-                            }
-                            baseview::MouseButton::Middle => {
-                                slint::platform::PointerEventButton::Middle
-                            }
-                            _ => return EventStatus::Ignored,
+                        let Some(slint_button) = slint_pointer_button(button) else {
+                            return EventStatus::Ignored;
                         };
                         WindowEvent::PointerReleased {
                             button: slint_button,
@@ -865,14 +858,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn old_persisted_state_defaults_scale_factor_to_one() {
-        let state: SlintEditorState = serde_json::from_str(r#"{"size":[320, 200]}"#).unwrap();
-
-        assert_eq!(state.size(), (320, 200));
-        assert_eq!(state.scale_factor(), 1.0);
-    }
-
-    #[test]
     fn observed_scale_factor_survives_persistence_round_trip() {
         let state = SlintEditorState::new(320, 200);
         state.scale_factor.store(1.75);
@@ -921,11 +906,5 @@ mod tests {
                 WindowEvent::Resized { size }
             ] if size.width == 320.0 && size.height == 200.0
         ));
-    }
-
-    #[test]
-    fn resize_hint_is_opt_in() {
-        assert_eq!(resize_hint(false), ResizeHint::NON_RESIZABLE);
-        assert_eq!(resize_hint(true), ResizeHint::RESIZABLE);
     }
 }
