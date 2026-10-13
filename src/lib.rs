@@ -138,6 +138,56 @@ fn resize_hint(resizable: bool) -> ResizeHint {
     }
 }
 
+/// Slint calls the platform's primary shortcut key `control`: on macOS that is Command (see
+/// `KeyboardModifiers` in the Slint builtin structs), elsewhere it is Control.
+const COMMAND_IS_RESET: bool = cfg!(target_os = "macos");
+
+/// The modifier keys the editor reacts to during a pointer event: Shift makes a drag fine, and
+/// `reset` makes a click reset its control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PointerModifiers {
+    shift: bool,
+    reset: bool,
+}
+
+impl PointerModifiers {
+    fn from_baseview(modifiers: keyboard_types::Modifiers, command_is_reset: bool) -> Self {
+        Self {
+            shift: modifiers.shift(),
+            reset: if command_is_reset {
+                modifiers.meta()
+            } else {
+                modifiers.ctrl()
+            },
+        }
+    }
+
+    /// The key events that move Slint's tracked modifier state from `previous` to `self`.
+    fn key_events(self, previous: Self) -> impl Iterator<Item = WindowEvent> {
+        [
+            (slint::platform::Key::Shift, self.shift, previous.shift),
+            (slint::platform::Key::Control, self.reset, previous.reset),
+        ]
+        .into_iter()
+        .filter_map(|(key, now, before)| match (now, before) {
+            (true, false) => Some(WindowEvent::KeyPressed { text: key.into() }),
+            (false, true) => Some(WindowEvent::KeyReleased { text: key.into() }),
+            _ => None,
+        })
+    }
+}
+
+/// The keyboard modifiers baseview reports with a mouse event, for the events that carry them.
+fn mouse_modifiers(event: &baseview::MouseEvent) -> Option<keyboard_types::Modifiers> {
+    match event {
+        baseview::MouseEvent::CursorMoved { modifiers, .. }
+        | baseview::MouseEvent::ButtonPressed { modifiers, .. }
+        | baseview::MouseEvent::ButtonReleased { modifiers, .. }
+        | baseview::MouseEvent::WheelScrolled { modifiers, .. } => Some(*modifiers),
+        _ => None,
+    }
+}
+
 fn slint_pointer_button(
     button: baseview::MouseButton,
 ) -> Option<slint::platform::PointerEventButton> {
@@ -371,6 +421,8 @@ pub struct WindowHandler<T: slint::ComponentHandle> {
     adapter: Rc<BaseviewSlintAdapter>,
     window_context: WindowContext,
     prevent_key_event_propagation: RefCell<bool>,
+    /// The modifier state last dispatched to Slint, so pointer events only send the changes.
+    pointer_modifiers: RefCell<PointerModifiers>,
     resizable: bool,
 }
 
@@ -437,6 +489,19 @@ impl<T: slint::ComponentHandle> WindowHandler<T> {
 
     pub fn set_prevent_key_event_propagation(&self, is_enabled: bool) {
         *self.prevent_key_event_propagation.borrow_mut() = is_enabled;
+    }
+
+    /// Tell Slint about pointer modifier changes before the pointer event is dispatched, since
+    /// hosts may swallow the modifier key events.
+    fn sync_pointer_modifiers(&self, wanted: PointerModifiers) {
+        let mut last = self.pointer_modifiers.borrow_mut();
+        if *last == wanted {
+            return;
+        }
+        for event in wanted.key_events(*last) {
+            self.adapter.window.dispatch_event(event);
+        }
+        *last = wanted;
     }
 
     /// Request a logical window size. The host may deny the resize; in that case
@@ -536,6 +601,12 @@ impl<T: slint::ComponentHandle + 'static> BaseviewWindowHandler for WindowHandle
     fn on_event(&self, event: Event) -> EventStatus {
         match event {
             Event::Mouse(mouse_event) => {
+                if let Some(modifiers) = mouse_modifiers(&mouse_event) {
+                    self.sync_pointer_modifiers(PointerModifiers::from_baseview(
+                        modifiers,
+                        COMMAND_IS_RESET,
+                    ));
+                }
                 // Convert baseview mouse event to Slint event
                 let slint_event = match mouse_event {
                     baseview::MouseEvent::CursorMoved { position, .. } => {
@@ -593,14 +664,6 @@ impl<T: slint::ComponentHandle + 'static> BaseviewWindowHandler for WindowHandle
                         keyboard_types::Code::ArrowDown => slint::platform::Key::DownArrow.into(),
                         keyboard_types::Code::ArrowLeft => slint::platform::Key::LeftArrow.into(),
                         keyboard_types::Code::ArrowRight => slint::platform::Key::RightArrow.into(),
-                        keyboard_types::Code::ShiftLeft => slint::platform::Key::Shift.into(),
-                        keyboard_types::Code::ShiftRight => slint::platform::Key::ShiftR.into(),
-                        keyboard_types::Code::ControlLeft => slint::platform::Key::Control.into(),
-                        keyboard_types::Code::ControlRight => slint::platform::Key::ControlR.into(),
-                        keyboard_types::Code::AltLeft => slint::platform::Key::Alt.into(),
-                        keyboard_types::Code::AltRight => slint::platform::Key::AltGr.into(),
-                        keyboard_types::Code::MetaLeft => slint::platform::Key::Meta.into(),
-                        keyboard_types::Code::MetaRight => slint::platform::Key::MetaR.into(),
                         _ => "".into(),
                     }
                 };
@@ -826,6 +889,7 @@ impl<T: slint::ComponentHandle + 'static> Editor for SlintEditor<T> {
                     adapter,
                     window_context,
                     prevent_key_event_propagation: RefCell::new(false),
+                    pointer_modifiers: RefCell::new(PointerModifiers::default()),
                     resizable,
                 };
 
@@ -889,6 +953,71 @@ mod tests {
         assert_eq!(state.scale_factor(), 1.0);
         let size = native_size(&state);
         assert_eq!((size.width, size.height), (320, 200));
+    }
+
+    #[test]
+    fn pointer_modifier_changes_emit_only_the_keys_that_changed() {
+        let none = PointerModifiers::default();
+        let shift = PointerModifiers {
+            shift: true,
+            reset: false,
+        };
+        let both = PointerModifiers {
+            shift: true,
+            reset: true,
+        };
+
+        assert!(none.key_events(none).next().is_none());
+
+        let shift_text: SharedString = slint::platform::Key::Shift.into();
+        let control_text: SharedString = slint::platform::Key::Control.into();
+        let pressed: Vec<_> = shift.key_events(none).collect();
+        assert!(
+            matches!(pressed.as_slice(), [WindowEvent::KeyPressed { text }] if *text == shift_text),
+            "{pressed:?}"
+        );
+        let released: Vec<_> = none.key_events(shift).collect();
+        assert!(
+            matches!(released.as_slice(), [WindowEvent::KeyReleased { text }] if *text == shift_text),
+            "{released:?}"
+        );
+
+        let turned_on: Vec<SharedString> = both
+            .key_events(none)
+            .map(|event| match event {
+                WindowEvent::KeyPressed { text } | WindowEvent::KeyReleased { text } => text,
+                other => panic!("a modifier change must only dispatch key events, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(turned_on, [shift_text, control_text]);
+    }
+
+    #[test]
+    fn the_reset_modifier_is_command_on_macos_and_control_elsewhere() {
+        let command = keyboard_types::Modifiers::META;
+        let control = keyboard_types::Modifiers::CONTROL;
+
+        assert!(PointerModifiers::from_baseview(command, true).reset);
+        assert!(!PointerModifiers::from_baseview(control, true).reset);
+        assert!(PointerModifiers::from_baseview(control, false).reset);
+        assert!(!PointerModifiers::from_baseview(command, false).reset);
+    }
+
+    #[test]
+    fn shift_is_the_fine_drag_modifier_on_every_platform() {
+        let modifiers = keyboard_types::Modifiers::SHIFT;
+        assert!(PointerModifiers::from_baseview(modifiers, true).shift);
+        assert!(PointerModifiers::from_baseview(modifiers, false).shift);
+    }
+
+    #[test]
+    fn only_pointer_events_that_carry_modifiers_report_them() {
+        assert!(mouse_modifiers(&baseview::MouseEvent::CursorLeft).is_none());
+        assert!(mouse_modifiers(&baseview::MouseEvent::CursorMoved {
+            position: baseview::dpi::PhysicalPosition::new(1.0, 2.0),
+            modifiers: keyboard_types::Modifiers::SHIFT,
+        })
+        .is_some());
     }
 
     #[test]
